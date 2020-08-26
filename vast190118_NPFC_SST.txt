@@ -1,0 +1,282 @@
+#####産卵量データの読み込み#####
+setwd(dir = "/Users/Yuki/Google ドライブ/analysis/vast")
+es <- read.csv("egg_data2005-201806.csv", fileEncoding = "UTF-8")
+es2 <- es
+es2$chub_mean_dens[is.na(es2$chub_mean_dens)] <- 0 #卵密度がNAの要素に０を放り込む
+summary(es2)
+es2$lon2 <- ifelse (es2$lon %% 1 == 0.0, es2$lon, es2$lon %/% 1 + 0.5)
+es2$lat2 <- ifelse (es2$lat %% 1 == 0.0, es2$lat, es2$lat %/% 1 + 0.5)
+es2$lat2 <- es2$lat2+0.25
+es2$lon2 <- es2$lon2+0.25
+es2 <- es2[, c(1:4, 6:7, 11:12)]
+summary(es2$area_no)
+es2 <- subset(es2, area_no < 4)
+summary(es2$lat2) #26.75 to 42.75
+summary(es2$lon2) #131.25 to 149.75
+#es2 <- subset(es2, lon2 < 150)
+es2 <- transform(es2, site = paste(lat2, lon2, sep = "_")) #402
+n_site <- length(unique(es2$site))
+tag_site <- data.frame(unique(es2$site))
+#####SSTの読み込み#####
+setwd("/Users/Yuki/Google ドライブ/analysis/vast")
+sst <- read.csv("sst2.csv", fileEncoding = "CP932")
+#####packages#####
+source("http://www.math.ntnu.no/inla/givemeINLA.R")
+Version = "VAST_v4_2_0"
+require(TMB)
+require(VAST)
+#####3 Settings#####
+setwd(dir = "/Users/Yuki/Dropbox")
+DateFile = "/Users/Yuki/Dropbox/vast0118_lognorm_log_200SST"
+dir.create(DateFile)
+###3.1 Spatial settings###
+Method = c("Grid", "Mesh", "Spherical_mesh")[2]
+Kmeans_Config = list("randomseed" = 1, "nstart" = 100, "iter.max" = 1000)
+###3.2 Model settings###
+FieldConfig = c(Omega1 = 1, Epsilon1 = 1, Omega2 = 1, Epsilon2 = 1)
+RhoConfig = c(Beta1 = 0, Beta2 = 0, Epsilon1 = 0, Epsilon2 = 0)
+VesselConfig = c(Vessel = 0, VesselYear = 0)
+ObsModel = c(PosDist = 1, Link = 0) #[1] = 1(lognormal) or 2(ガンマ), [2] = 0
+###3.3 Stratification for results###
+strata.limits <- data.frame(STRATA = "All_areas")
+#####4. Prepare the data#####
+###4.1 Data-frame for catch-rate data###
+cm <- es2
+head(cm)
+cm2 <- cm[, c("year", "lat2", "lon2", "month", "chub_mean_dens")]
+colnames(cm2) <- c("Year", "Lat", "Lon", "Month", "Catch_KG")
+cm2 <- subset(cm2, Month < 8)
+cm2 <- subset(cm2, Month > 2)
+summary(cm2)
+Data_Geostat <- cm2
+summary(Data_Geostat$Year)
+#####4.2 Extrapolation grid#####
+Extrapolation_List = SpatialDeltaGLMM::Prepare_Extrapolation_Data_Fn(
+  Regio = "other", #userにすると，zoneが23となってしまう（日本のzoneは51:56）
+  strata.limits = strata.limits, 
+  observations_LL = Data_Geostat[, c("Lat", "Lon")], 
+  #maximum_distance_from_sample = 15,
+  #input_grid = Data_Geostat[, c("Lat", "Lon", "Area_km2")] #海区面積(km2)
+)
+###4.3 derived objects for spatio-temporal estimation###
+Spatial_List = SpatialDeltaGLMM::Spatial_Information_Fn(
+  #n_x = n_site,
+  n_x = 200,
+  Lon = Data_Geostat[, "Lon"], 
+  Lat = Data_Geostat[, "Lat"], 
+  Extrapolation_List = Extrapolation_List, 
+  Method = "Mesh",
+  grid_size_km = 0.5, #methodがsperical_meshの時はgrid_size_LL, それ以外の時はgrid_size_km
+  randomseed = Kmeans_Config[["randomseed"]], 
+  nstart = Kmeans_Config[["nstart"]], 
+  iter.max = Kmeans_Config[["iter.max"]], 
+  DirPath = DateFile,
+  Save_Results = FALSE) #Kmeans-100.RDataが作成されるはず. ファイル名の数字には，n_xの値が入る
+Data_Geostat <- cbind(Data_Geostat, knot_i = Spatial_List[["knot_i"]])
+#####knotの緯度経度#####
+t <- Data_Geostat
+summary(t$knot_i) #1:100
+t <- transform(t, tag_knot = paste(Lon, Lat, knot_i, sep = "_"))
+tag_knot <- data.frame(unique(t$tag_knot)) #それぞれのknotの地理情報を抽出
+require(stringr)
+tag_knot$lon <- as.numeric(str_sub(tag_knot[, 1], start = 1, end = 6))
+tag_knot$lat <- as.numeric(str_sub(tag_knot[, 1], start = 8, end = 12))
+tag_knot$knot_i <- as.numeric(str_sub(tag_knot[, 1], start = 14, end = 16))
+summary(tag_knot$knot_i)
+tag_knot$tag_sst_lat <- ifelse((tag_knot$lat+0.25)%%1 == 0, (tag_knot$lat-0.25), (tag_knot$lat+0.25))
+tag_knot$tag_sst_lon <- ifelse((tag_knot$lon+0.25)%%1 == 0, (tag_knot$lon-0.25), (tag_knot$lon+0.25))
+summary(tag_knot$knot_i)
+head(tag_knot)
+#####SSTの準備#####
+sst2 <- sst[, c(2:4, 6:7)]
+summary(sst2)
+sst2 <- sst2[sst2$year > 2004, ]
+sst2 <- subset(sst2, month < 8)
+sst2 <- subset(sst2, month > 2)
+sst2 <- subset(sst2, SST != -99.9)
+summary(sst2)
+colnames(sst2) <- c("tag_sst_lon", "tag_sst_lat", "SST", "Year", "Month") #nrow = 46280
+#tag_site2 <- tag_site[, -1]
+#t <- subset(sst2, tag_sst_lat == 37.5)
+#t <- subset(t, tag_sst_lon == 141.5)
+SST <- merge(tag_knot, sst2, by = c("tag_sst_lon", "tag_sst_lat"), all = T)
+summary(SST$knot_i) #knotが0:9になっちゃう！！！->解決した
+SST <- na.omit(SST)
+require(plyr)
+SST2 <- ddply(SST, .(Year, Month, knot_i), summarize, SST = mean(SST))
+#SST3 <- ddply(SST, .(Month, knot_i), summarize, month_mean = mean(SST), sd = sd(SST))
+#SST2 <- merge(SST2, SST3, by = c("Month", "knot_i"))
+#SST2$SST2 <- (SST2$SST - SST2$month_mean)/SST2$sd
+#SST2$SST3 <- SST2$SST2+(SST2$SST2)^2
+year_SST <- ddply(SST, .(Year, knot_i), summarize, SST = mean(SST))
+###arrayの作成###
+#SST2 <- arrange(SST2, knot_i, Year, Month)
+n_knot <- length(unique(tag_knot$knot_i))
+n_yr <- length(unique(Data_Geostat$Year))
+n_mt <- length(unique(Data_Geostat$Month))
+v1 <- SST2$SST #年，月，ノットごとの平均
+v2 <- SST2$SST3 #??
+v3 <- year_SST$SST #年，ノットごとの平均
+a_sst <- array(v1, dim = c(n_knot, n_yr, n_mt))
+m_sst <- array(v3, dim = c(n_knot, n_yr))
+#####月のデータセット#####
+Data_Geostat$month1 <- ifelse(Data_Geostat$Month == 1, 1, 0)
+Data_Geostat$month2 <- ifelse(Data_Geostat$Month == 2, 1, 0)
+Data_Geostat$month3 <- ifelse(Data_Geostat$Month == 3, 1, 0)
+Data_Geostat$month4 <- ifelse(Data_Geostat$Month == 4, 1, 0)
+Data_Geostat$month5 <- ifelse(Data_Geostat$Month == 5, 1, 0)
+Data_Geostat$month6 <- ifelse(Data_Geostat$Month == 6, 1, 0)
+Data_Geostat$month7 <- ifelse(Data_Geostat$Month == 7, 1, 0)
+mat_month <- as.matrix(Data_Geostat[, 7:13])
+mat_month2 <- as.matrix(data.frame(Data_Geostat$Month, (Data_Geostat$Month)^2))
+#####5 Build and run model#####
+###5.1 Build model###
+Data_Geostat$Year <- as.numeric(as.character(Data_Geostat$Year))
+mode(Data_Geostat$Year) #numeric
+mode(Data_Geostat$knot_i) #numeric
+summary(Data_Geostat$Year) #2005-2018
+summary(Data_Geostat$knot_i) #1:200
+summary(Data_Geostat$Month) #1:7
+TmbData = Data_Fn(
+  Version = Version,
+  FieldConfig = FieldConfig,
+  RhoConfig = RhoConfig,
+  ObsModel = ObsModel,
+  b_i = Data_Geostat[, "Catch_KG"], 
+  a_i = rep(1,nrow(Data_Geostat)),
+  #a_i = Data_Geostat[, "Effort"],
+  c_iz = rep(0,nrow(Data_Geostat)), #単一種の場合
+  s_i = Data_Geostat[, "knot_i"] - 1,
+  #t_iz = as.matrix(Data_Geostat[, c("Year", "Month")]),
+  t_iz = as.matrix(Data_Geostat[, "Year"]),
+  #Q_ik = as.matrix(Data_Geostat[, "Month"] - 1), #とりあえずMonthがcatchabilityのcovariateと仮定
+  #Q_ik = mat_month2,
+  a_xl = Spatial_List$a_xl,
+  X_xtp = a_sst,
+  MeshList = Spatial_List$MeshList,
+  GridList = Spatial_List$GridList,
+  Method = Spatial_List$Method,
+  Aniso = 0, #Using isotropic 2D AR1 hyperdistribution, so switching to Aniso=0
+  Options = c(SD_site_density = 1, 
+              SD_site_longensity = 1, 
+              Calculate_Range = 1, 
+              Calculate_evenness = 1, 
+              Calculate_effective_area = 1)
+)
+TmbList = Build_TMB_Fn(TmbData = TmbData,
+                       RunDir = DateFile,
+                       Version = Version,
+                       RhoConfig = RhoConfig,
+                       loc_x = Spatial_List$loc_x,
+                       Method = Spatial_List$Method)
+Obj = TmbList[["Obj"]]
+Opt = TMBhelper::Optimize(obj = Obj, 
+                          lower = TmbList[["Lower"]], 
+                          upper = TmbList[["Upper"]],
+                          getsd = TRUE, 
+                          savedir = DateFile, 
+                          bias.correct = TRUE)
+Report = Obj$report()
+Save = list("Opt"=Opt, 
+            "Report"=Report, 
+            "ParHat"=Obj$env$parList(Opt$par),
+            "TmbData"=TmbData)
+save(Save, file=paste0(DateFile,"Save.RData"))
+setwd(dir = DateFile)
+load("vast0118_lognorm_log_100SSTSave.RData")
+##----------------------
+## 6 Diagnostic plots
+# 6.1 Plot data
+SpatialDeltaGLMM::Plot_data_and_knots(Extrapolation_List = Extrapolation_List,
+                                      Spatial_List = Spatial_List, 
+                                      Data_Geostat = Data_Geostat,
+                                      PlotDir = DateFile)
+# 6.2 Convergence
+# require(pander) which(sapply(t, is.factor)) でエラー: 'which' へ渡す引数が論理型ではありません 
+pander::pandoc.table(Opt$diagnostics[,c('Param','Lower','MLE',
+                                        'Upper','final_gradient')] )
+test <- Opt[[1]][[10]] #Opt$diagnostics
+# 6.3 Diagnostics for encounter-probability component
+Enc_prob = SpatialDeltaGLMM::Check_encounter_prob(Report = Report,
+                                                  Data_Geostat = Data_Geostat, 
+                                                  DirName = DateFile)
+Q = SpatialDeltaGLMM::QQ_Fn(TmbData = TmbData, 
+                            Report = Report)
+# 6.5 Diagnostics for plotting residuals on a map
+# Get region-specific settings for plots
+MapDetails_List = SpatialDeltaGLMM::MapDetails_Fn(
+  "Region"="other",
+  "NN_Extrap"=Spatial_List$PolygonList$NN_Extrap, 
+  "Extrapolation_List"=Extrapolation_List)
+# Decide which years to plot
+Year_Set = seq(min(Data_Geostat[,'Year']),max(Data_Geostat[,'Year']))
+Years2Include = which( Year_Set %in% sort(unique(Data_Geostat[,'Year'])))
+# tapply(bpred_ipos[which_ipos_in_y], INDEX = factor(TmbData$s_i[which_i_in_y_and_pos],  でエラー: arguments must have same length
+SpatialDeltaGLMM:::plot_residuals(Lat_i = Data_Geostat[,"Lat"], 
+                                  Lon_i = Data_Geostat[, "Lon"], 
+                                  TmbData = TmbData,
+                                  Report = Report, 
+                                  Q = Q, 
+                                  savedir = DateFile,
+                                  MappingDetails = MapDetails_List[["MappingDetails"]],
+                                  PlotDF = MapDetails_List[["PlotDF"]],
+                                  MapSizeRatio = MapDetails_List[["MapSizeRatio"]],
+                                  Xlim = MapDetails_List[["Xlim"]], 
+                                  Ylim = MapDetails_List[["Ylim"]],
+                                  FileName = DateFile, 
+                                  Year_Set = Year_Set, 
+                                  Years2Include = Years2Include,
+                                  Rotate = MapDetails_List[["Rotate"]], 
+                                  Cex = MapDetails_List[["Cex"]],
+                                  Legend = MapDetails_List[["Legend"]], 
+                                  zone = MapDetails_List[["Zone"]],
+                                  mar = c(0, 0, 2, 0), 
+                                  oma = c(3.5, 3.5, 0, 0), 
+                                  cex = 1)
+# 6.6 Model selection
+Opt$AIC
+#----------------------
+# 7 Model output
+# 7.1 Direction of “geometric anisotropy???
+SpatialDeltaGLMM::PlotAniso_Fn(FileName = paste0(DateFile,"Aniso.png"), 
+                               Report = Report, 
+                               TmbData = TmbData)
+head(MapDetails_List[["PlotDF"]])
+# 7.2 Density surface for each year
+SpatialDeltaGLMM::PlotResultsOnMap_Fn(plot_set = c(3),
+                                      MappingDetails = MapDetails_List[["MappingDetails"]],
+                                      Report = Report, 
+                                      Sdreport = Opt$SD, 
+                                      PlotDF = MapDetails_List[["PlotDF"]],
+                                      MapSizeRatio = MapDetails_List[["MapSizeRatio"]],
+                                      Xlim = MapDetails_List[["Xlim"]], 
+                                      Ylim = MapDetails_List[["Ylim"]],
+                                      FileName = DateFile, 
+                                      Year_Set = Year_Set, 
+                                      Years2Include = Years2Include,
+                                      Rotate = MapDetails_List[["Rotate"]], 
+                                      Cex = MapDetails_List[["Cex"]],
+                                      Legend = MapDetails_List[["Legend"]], 
+                                      zone = MapDetails_List[["Zone"]],
+                                      mar = c(0, 0, 2, 0), 
+                                      oma = c(3.5, 3.5, 0, 0), 
+                                      cex = 1, pch = 19,
+                                      plot_legend_fig = TRUE)
+# 7.3 Index of abundance
+Index = SpatialDeltaGLMM::PlotIndex_Fn(DirName = DateFile,
+                                       TmbData = Save$TmbData, 
+                                       Sdreport = Save$Opt[["SD"]],
+                                       Year_Set = Year_Set,
+                                       Years2Include = Years2Include, #年数？
+                                       use_biascorr = TRUE
+)
+pander::pandoc.table(Index$Table[, c("Year","Fleet","Estimate_metric_tons", 
+                                     "SD_log", "SD_mt")])
+# 7.4 Center of gravity and range expansion/contraction
+SpatialDeltaGLMM::Plot_range_shifts(Report = Report, 
+                                    TmbData = TmbData, 
+                                    Sdreport = Opt[["SD"]],
+                                    Znames = colnames(TmbData$Z_xm),
+                                    PlotDir = DateFile, 
+                                    Year_Set = Year_Set)
+
